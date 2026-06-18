@@ -63,18 +63,15 @@ export async function parseEpub(file) {
     const heading = body.querySelector('h1, h2, h3, h4')
     let chTitle = heading?.textContent?.trim() || ''
 
-    // 提取段落
-    const paragraphs = []
-    const elements = body.querySelectorAll('p, div')
+    cleanBody(body)
 
-    elements.forEach(el => {
-      const text = el.textContent?.trim()
-      if (text && text.length > 0) {
-        // 跳过纯标题重复
-        if (text === chTitle && paragraphs.length === 0) return
-        paragraphs.push(text)
-      }
-    })
+    // 提取段落
+    let paragraphs = extractParagraphs(body)
+    if (paragraphs[0] === chTitle) paragraphs = paragraphs.slice(1)
+    if (paragraphs.length === 0) {
+      const fallbackText = cleanText(body.textContent || '')
+      paragraphs = splitLongParagraph(fallbackText)
+    }
 
     if (paragraphs.length === 0) continue
 
@@ -98,4 +95,160 @@ function blobToBase64(blob) {
     reader.onloadend = () => resolve(reader.result)
     reader.readAsDataURL(blob)
   })
+}
+
+function cleanBody(body) {
+  body.querySelectorAll('script, style, nav, header, footer, svg, noscript').forEach(el => el.remove())
+}
+
+function extractParagraphs(body) {
+  const blockSelector = 'p, blockquote, li, h1, h2, h3, h4, h5, h6, div, section, article'
+  const blocks = [...body.querySelectorAll(blockSelector)]
+  const paragraphs = []
+
+  for (const el of blocks) {
+    if (isImgOnlyBlock(el)) continue
+    if (shouldSkipContainer(el, blockSelector)) continue
+
+    for (const part of getElementParagraphs(el)) {
+      const text = cleanText(part)
+      if (!isMeaningfulText(text)) continue
+      paragraphs.push(...splitLongParagraph(text))
+    }
+  }
+
+  return dedupeAdjacent(paragraphs)
+}
+
+function shouldSkipContainer(el, blockSelector) {
+  const tag = el.tagName.toLowerCase()
+  if (!['div', 'section', 'article', 'blockquote', 'li'].includes(tag)) return false
+
+  const childBlocks = [...el.querySelectorAll(blockSelector)]
+    .filter(child => child !== el && isMeaningfulText(cleanText(child.textContent || '')))
+  return childBlocks.length > 0
+}
+
+function getElementParagraphs(el) {
+  const clone = el.cloneNode(true)
+  clone.querySelectorAll('script, style, nav, header, footer, svg, noscript').forEach(node => node.remove())
+
+  const brCount = clone.querySelectorAll('br').length
+  clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'))
+
+  const raw = clone.textContent || ''
+  const normalized = raw
+    .replace(/\r/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t\f\v]+\n/g, '\n')
+    .replace(/\n[ \t\f\v]+/g, '\n')
+
+  const blankLineParts = normalized.split(/\n\s*\n+/).map(cleanText).filter(isMeaningfulText)
+  if (blankLineParts.length > 1) return blankLineParts
+
+  const lineParts = normalized.split(/\n+/).map(cleanText).filter(isMeaningfulText)
+  if (brCount >= 2 && lineParts.length > 1) return lineParts
+
+  return [normalized]
+}
+
+function cleanText(text) {
+  return String(text || '')
+    .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t\f\v]+/g, ' ')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim()
+}
+
+function isMeaningfulText(text) {
+  if (!text) return false
+  if (/^[\s\-—–·•*#~＿_.,，。:：;；!！?？'"“”‘’（）()[\]{}<>《》]+$/.test(text)) return false
+  return /[\p{L}\p{N}\u4e00-\u9fff]/u.test(text)
+}
+
+function isImgOnlyBlock(el) {
+  const text = cleanText(el.textContent || '')
+  if (isMeaningfulText(text)) return false
+
+  const media = el.querySelector('img, image, svg')
+  return Boolean(media)
+}
+
+function splitLongParagraph(text, maxLen = 800) {
+  const cleaned = cleanText(text)
+  if (!cleaned) return []
+  if (cleaned.length <= maxLen) return [cleaned]
+
+  const sentences = splitSentences(cleaned)
+  if (sentences.length <= 1) return [cleaned]
+
+  const result = []
+  let current = ''
+  const minLen = Math.floor(maxLen / 2)
+
+  for (const sentence of sentences) {
+    if (!current) {
+      current = sentence
+      continue
+    }
+
+    if (current.length + sentence.length > maxLen && current.length >= minLen) {
+      result.push(current)
+      current = sentence
+    } else if (current.length + sentence.length > maxLen) {
+      result.push(current)
+      current = sentence
+    } else {
+      current += sentence
+    }
+  }
+
+  if (current) result.push(current)
+  return result
+}
+
+function splitSentences(text) {
+  const sentences = []
+  let current = ''
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    current += ch
+
+    if (isSentenceEnd(ch)) {
+      while (i + 1 < text.length && isClosingQuote(text[i + 1])) {
+        i++
+        current += text[i]
+      }
+      sentences.push(current)
+      current = ''
+    }
+  }
+
+  if (current) sentences.push(current)
+  return sentences
+}
+
+function isSentenceEnd(ch) {
+  return /[。！？!?]/.test(ch) || ch === '…'
+}
+
+function isClosingQuote(ch) {
+  return /[」”’》）)]/.test(ch)
+}
+
+function dedupeAdjacent(paragraphs) {
+  const result = []
+  let prev = ''
+
+  for (const paragraph of paragraphs) {
+    const text = cleanText(paragraph)
+    if (!isMeaningfulText(text)) continue
+    if (text === prev) continue
+    result.push(text)
+    prev = text
+  }
+
+  return result
 }
