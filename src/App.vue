@@ -44,7 +44,7 @@
     </div>
 
     <BaseModal v-if="activeModal === 'bookshelf'" title="书 架" @close="activeModal = null">
-      <Bookshelf @bookOpened="handleBookOpen" @close="activeModal = null" />
+      <Bookshelf @bookOpened="handleBookOpen" @bookDeleted="handleBookDeleted" @close="activeModal = null" />
     </BaseModal>
     <BaseModal v-if="activeModal === 'persona'" title="角 色" @close="activeModal = null">
       <PersonaEditor @saved="activeModal = null" />
@@ -89,6 +89,12 @@ function handleBookOpen(book) {
   currentChapterTitle.value = ''
   // 停止首页生成
   if (quoteAbort) { quoteAbort.abort(); quoteAbort = null }
+}
+
+function handleBookDeleted(bookId) {
+  if (currentBook.value?.id !== bookId) return
+  currentBook.value = null
+  currentChapterTitle.value = ''
 }
 
 // 弹窗关闭后通知 ReaderView 刷新主题/字号

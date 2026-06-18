@@ -77,7 +77,7 @@ import {
   exportBook, importBook, exportAll, importAll,
   downloadJson, readJsonFile
 } from '../services/dataExport.js'
-const emit = defineEmits(['bookOpened', 'close'])
+const emit = defineEmits(['bookOpened', 'bookDeleted', 'close'])
 const books = ref([])
 const showOrganize = ref(false)
 const pendingTitle = ref('')
@@ -142,13 +142,27 @@ function openBook(book) {
   emit('close')
 }
 async function deleteBook(book) {
-  if (!confirm(`确定删除《${book.title}》？所有批注、评论、摘要都会一并删除。`)) return
-  await db.chapters.where('bookId').equals(book.id).delete()
-  await db.annotations.where('bookId').equals(book.id).delete()
-  await db.comments.where('bookId').equals(book.id).delete()
-  await db.memories.where('bookId').equals(book.id).delete()
-  await db.books.delete(book.id)
-  await loadBooks()
+  const confirmed = confirm(`确定要删除《${book.title}》吗？
+
+这会同时删除该书的章节、批注、评论、摘要和相关记忆。
+此操作不可撤销。建议删除前先导出备份。`)
+  if (!confirmed) return
+
+  try {
+    await db.transaction('rw', db.books, db.chapters, db.annotations, db.comments, db.memories, async () => {
+      await db.annotations.where('bookId').equals(book.id).delete()
+      await db.comments.where('bookId').equals(book.id).delete()
+      await db.memories.where('bookId').equals(book.id).delete()
+      await db.chapters.where('bookId').equals(book.id).delete()
+      await db.books.delete(book.id)
+    })
+    await loadBooks()
+    emit('bookDeleted', book.id)
+    alert(`《${book.title}》已删除`)
+  } catch (err) {
+    console.error('删除失败:', err)
+    alert('删除失败: ' + err.message)
+  }
 }
 async function handleExportBook(book) {
   try {
