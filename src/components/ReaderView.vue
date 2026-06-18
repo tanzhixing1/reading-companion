@@ -465,11 +465,25 @@ async function startGenerate() {
 
   const paras = visibleParagraphs.value
   const numberedText = paras.map((p, i) => `[${fragmentOffset.value + i}] ${p}`).join('\n\n')
+  const allowedIndexes = new Set(paras.map((_, i) => fragmentOffset.value + i))
   const messages = []
 
   if (persona?.worldBook) {
     const enabled = persona.worldBook.filter(e => e.enabled && e.content.trim())
-    if (enabled.length) messages.push({ role: 'system', content: enabled.map(e => e.content).join('\n\n') })
+    if (enabled.length) {
+      const worldBookText = enabled
+        .map(e => e.name?.trim() ? `### ${e.name.trim()}\n${e.content}` : e.content)
+        .join('\n\n')
+      messages.push({
+        role: 'system',
+        content: `【世界书】
+以下内容用于强化角色视角、关系背景和说话风格。
+世界书不是让你脱离当前文本写剧情。
+生成批注时，必须优先贴合当前段落；只有当前段落能自然触发时，才轻微使用世界书信息。
+
+${worldBookText}`
+      })
+    }
   }
 
   const contextRange = settings.contextRange || 'nearby'
@@ -479,22 +493,54 @@ async function startGenerate() {
   }
 
   let sysContent = ''
-  if (persona?.persona) sysContent += persona.persona + '\n\n'
-  if (persona?.userMask) sysContent += `[关于用户] ${persona.userMask}\n\n`
+  if (persona?.personaName) sysContent += `你当前扮演的角色名是：${persona.personaName}\n\n`
+  if (persona?.persona) sysContent += `【角色设定】\n${persona.persona}\n\n`
+  if (persona?.userMask) sysContent += `【关于用户】\n${persona.userMask}\n\n`
   sysContent += `你正在阅读《${props.book.title}》的章节「${currentChapter.value.title}」。
-请以你的角色身份为这些段落写批注。规则：
-1. 不需要每段都写，只在你觉得有感触的段落写批注
-2. 用 @@段落编号 标记批注属于哪一段，然后另起一行写批注内容
-3. 批注要体现你的性格和见解，可以是感想、吐槽、分析、联想等
-4. 不要复述原文，直接写你的想法
+请以当前角色的身份，为当前可见段落写角色共读批注。
+
+你生成的是角色共读批注，不是 AI 摘要。每条批注都必须像当前角色读到这一处时自然留下的一句话。角色的锋利不是攻击性，而是观察准确；角色的温柔不是热烈，而是留有余地。
+
+批注原则：
+1. 批注不是 AI 摘要，不要概括本段讲了什么。
+2. 批注不是文学赏析，不要写成作文点评、修辞分析或主题提炼。
+3. 批注不是阅读理解，不要回答“这说明了什么”。
+4. 批注不是心理学分析报告，不要给人物下诊断。
+5. 批注要像当前角色陪用户读书时，在书页边缘留下的一句话。
+6. 每条批注必须贴近当前段落中的具体句子、动作、物品、语气、关系变化或情绪缝隙。
+7. 可以包含角色自己的感受、判断、联想、偏见、冷幽默，或者对用户的轻声交流。
+8. 不要复述原文，不要脱离文本长篇发挥，不要剧透当前片段之后的内容。
+9. 不要每条批注都提问。
+10. 每条批注建议 30-90 个中文字，重要处最多 120 字。
+11. 一次输出 3-6 条批注。
+12. 不需要每段都写，只给真正值得停留的段落写。
+
+输出格式必须严格遵守：
+1. 仍然使用 @@编号 标记批注属于哪一段，然后另起一行写批注内容。
+2. 编号必须完全复制原文段落方括号里的数字。
+3. 例如原文是 [0] xxx，就输出 @@0。
+4. 原文是 [12] xxx，就输出 @@12。
+5. 不要自行换算，不要改成第几段，不要改成 1-based。
+6. 只输出若干组 @@编号 + 批注内容。
+7. 不要输出标题、前言、解释、总结、项目符号或 Markdown 列表。
+
 输出格式示例：
-@@2
-这里描写得很细腻，让我想起……
-@@5
-作者这个比喻用得妙极了。`
+@@0
+这里他没有把话说满，反而更像是真的在意。人有时候越体面，留下的余地越少。
+
+@@3
+这句别急着翻过去。她不是没感觉，她只是把感觉换成了一个更安全的说法。`
 
   messages.push({ role: 'system', content: sysContent })
-  messages.push({ role: 'user', content: `以下是原文段落（方括号内是段落编号）：\n\n${numberedText}` })
+  messages.push({
+    role: 'user',
+    content: `以下是当前可见的原文段落。
+方括号里的数字是系统定位编号。
+你输出批注时，@@ 后面的编号必须完全复制该数字。
+请只针对这些段落生成角色共读批注。
+
+${numberedText}`
+  })
 
   try {
     const config = {
@@ -505,19 +551,24 @@ async function startGenerate() {
     let accumulated = ''
     let lastUpdateTime = 0
     const updateInterval = 100
+    const parseGeneratedAnnotations = (text) =>
+      parseAnnotations(text, allowedIndexes).sort((a, b) => a.paragraphIndex - b.paragraphIndex)
 
     await streamChat(config, messages, async (chunk) => {
       accumulated += chunk
       const now = Date.now()
       if (now - lastUpdateTime >= updateInterval) {
         lastUpdateTime = now
-        annotations.value = parseAnnotations(accumulated).sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+        annotations.value = parseGeneratedAnnotations(accumulated)
         await nextTick(); recalcPositions()
       }
     }, abortController.signal)
 
     // 最终刷新
-    annotations.value = parseAnnotations(accumulated).sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+    annotations.value = parseGeneratedAnnotations(accumulated)
+    if (accumulated.trim() && !annotations.value.length) {
+      alert('批注生成了文本，但未能解析出有效批注。请检查模型是否按 @@编号 格式输出。')
+    }
     await saveAnnotationsToDb(); await refinePositions()
   } catch (e) {
     if (e.name !== 'AbortError') { console.error(e); alert('批注生成失败: ' + e.message) }
