@@ -57,7 +57,7 @@
         <div class="margin-column" ref="marginColumnEl">
           <div class="margin-inner" :style="{ minHeight: textColumnHeight + 'px' }">
             <div
-              v-for="(ann, idx) in annotations"
+              v-for="(ann, idx) in visibleAnnotations"
               :key="ann.dbId || idx"
               class="annotation-block"
               :style="{ top: annPositions[ann.paragraphIndex] + 'px' }"
@@ -81,11 +81,11 @@
               </div>
               <p v-else class="ann-text">
                 {{ ann.content }}
-                <span v-if="generating && idx === annotations.length - 1 && ann.content" class="cursor-blink">|</span>
+                <span v-if="generating && idx === visibleAnnotations.length - 1 && ann.content" class="cursor-blink">|</span>
               </p>
               <span class="ann-author">— {{ characterName }}</span>
             </div>
-            <div v-if="!generating && !annotations.length" class="margin-placeholder">
+            <div v-if="!generating && !visibleAnnotations.length" class="margin-placeholder">
               — 点击「请TA批注」—
             </div>
           </div>
@@ -257,7 +257,7 @@ function recalcPositions() {
   paraEls.forEach(el => { paraTopMap[parseInt(el.dataset.paraIndex, 10)] = el.offsetTop })
   const positions = {}
   let lastBottom = 0
-  const sorted = [...annotations.value].sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+  const sorted = [...visibleAnnotations.value].sort((a, b) => a.paragraphIndex - b.paragraphIndex)
   for (const ann of sorted) {
     const desiredTop = paraTopMap[ann.paragraphIndex] ?? 0
     const actualTop = Math.max(desiredTop, lastBottom + 8)
@@ -277,7 +277,7 @@ async function refinePositions() {
   const annBlocks = marginColumnEl.value.querySelectorAll('.annotation-block')
   const positions = {}
   let lastBottom = 0
-  const sorted = [...annotations.value].sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+  const sorted = [...visibleAnnotations.value].sort((a, b) => a.paragraphIndex - b.paragraphIndex)
   sorted.forEach((ann, i) => {
     const desiredTop = paraTopMap[ann.paragraphIndex] ?? 0
     const actualTop = Math.max(desiredTop, lastBottom + 8)
@@ -289,7 +289,7 @@ async function refinePositions() {
   textColumnHeight.value = Math.max(textColumnEl.value.scrollHeight, lastBottom + 20)
 }
 
-watch(annotations, async () => { recalcPositions(); await refinePositions() }, { deep: true })
+watch([annotations, fragmentIndex], async () => { recalcPositions(); await refinePositions() }, { deep: true })
 
 let resizeTimer = null
 function onResize() { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { recalcPositions(); refinePositions() }, 200) }
@@ -326,6 +326,15 @@ const canNext = computed(() =>
   fragmentIndex.value < totalFragments.value - 1 || chapterIndex.value < totalChapters.value - 1
 )
 const annotationsWithDiscussion = computed(() => annotations.value)
+const visibleAnnotationRange = computed(() => {
+  const start = fragmentOffset.value
+  const end = start + visibleParagraphs.value.length
+  return { start, end }
+})
+const visibleAnnotations = computed(() => {
+  const { start, end } = visibleAnnotationRange.value
+  return annotations.value.filter(a => a.paragraphIndex >= start && a.paragraphIndex < end)
+})
 
 function getAnnotation(paraIndex) { return annotations.value.find(a => a.paragraphIndex === paraIndex) }
 function getParagraphText(paraIndex) { return allParagraphs.value[paraIndex] || '' }
@@ -460,13 +469,22 @@ async function startGenerate() {
   const settings = await getSetting('appSettings')
   if (!settings?.apiKey) { alert('请先在「设置」中配置 API Key'); return }
   const persona = await getSetting('personaSettings')
-  generating.value = true; annotations.value = []
+  generating.value = true
   abortController = new AbortController()
 
-  const paras = visibleParagraphs.value
-  const numberedText = paras.map((p, i) => `[${fragmentOffset.value + i}] ${p}`).join('\n\n')
-  const allowedIndexes = new Set(paras.map((_, i) => fragmentOffset.value + i))
-  const messages = []
+  const batches = []
+  let batchOffset = 0
+  for (const batchParagraphs of fragments.value) {
+    batches.push({ paragraphs: batchParagraphs, offset: batchOffset })
+    batchOffset += batchParagraphs.length
+  }
+  console.log('[annotation] startGenerate', {
+    chapterTitle: currentChapter.value?.title,
+    fragmentCount: fragments.value.length,
+    currentFragmentIndex: fragmentIndex.value
+  })
+
+  const baseMessages = []
 
   if (persona?.worldBook) {
     const enabled = persona.worldBook.filter(e => e.enabled && e.content.trim())
@@ -474,12 +492,12 @@ async function startGenerate() {
       const worldBookText = enabled
         .map(e => e.name?.trim() ? `### ${e.name.trim()}\n${e.content}` : e.content)
         .join('\n\n')
-      messages.push({
+      baseMessages.push({
         role: 'system',
         content: `【世界书】
 以下内容用于强化角色视角、关系背景和说话风格。
 世界书不是让你脱离当前文本写剧情。
-生成批注时，必须优先贴合当前段落；只有当前段落能自然触发时，才轻微使用世界书信息。
+生成批注时，必须优先贴合当前批次段落；只有当前段落能自然触发时，才轻微使用世界书信息。
 
 ${worldBookText}`
       })
@@ -489,7 +507,7 @@ ${worldBookText}`
   const contextRange = settings.contextRange || 'nearby'
   if (contextRange === 'chapter+memory' && currentChapter.value) {
     const prevMemories = await getPreviousMemories(props.book.id, currentChapter.value.order)
-    if (prevMemories) messages.push({ role: 'system', content: prevMemories })
+    if (prevMemories) baseMessages.push({ role: 'system', content: prevMemories })
   }
 
   let sysContent = ''
@@ -497,7 +515,7 @@ ${worldBookText}`
   if (persona?.persona) sysContent += `【角色设定】\n${persona.persona}\n\n`
   if (persona?.userMask) sysContent += `【关于用户】\n${persona.userMask}\n\n`
   sysContent += `你正在阅读《${props.book.title}》的章节「${currentChapter.value.title}」。
-请以当前角色的身份，为当前可见段落写角色共读批注。
+请以当前角色的身份，为当前批次段落写角色共读批注。
 
 你生成的是角色共读批注，不是 AI 摘要。每条批注都必须像当前角色读到这一处时自然留下的一句话。角色的锋利不是攻击性，而是观察准确；角色的温柔不是热烈，而是留有余地。
 
@@ -531,16 +549,7 @@ ${worldBookText}`
 @@3
 这句别急着翻过去。她不是没感觉，她只是把感觉换成了一个更安全的说法。`
 
-  messages.push({ role: 'system', content: sysContent })
-  messages.push({
-    role: 'user',
-    content: `以下是当前可见的原文段落。
-方括号里的数字是系统定位编号。
-你输出批注时，@@ 后面的编号必须完全复制该数字。
-请只针对这些段落生成角色共读批注。
-
-${numberedText}`
-  })
+  baseMessages.push({ role: 'system', content: sysContent })
 
   try {
     const config = {
@@ -548,44 +557,135 @@ ${numberedText}`
       model: settings.model, temperature: 0.7, maxTokens: 4096,
       streamSpeed: settings.streamSpeed || 'normal'
     }
-    let accumulated = ''
-    let lastUpdateTime = 0
-    const updateInterval = 100
-    const parseGeneratedAnnotations = (text) =>
-      parseAnnotations(text, allowedIndexes).sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+    const allGeneratedAnnotations = []
 
-    await streamChat(config, messages, async (chunk) => {
-      accumulated += chunk
-      const now = Date.now()
-      if (now - lastUpdateTime >= updateInterval) {
-        lastUpdateTime = now
-        annotations.value = parseGeneratedAnnotations(accumulated)
-        await nextTick(); recalcPositions()
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      if (abortController.signal.aborted) {
+        const abortError = new Error('Aborted')
+        abortError.name = 'AbortError'
+        throw abortError
       }
-    }, abortController.signal)
 
-    // 最终刷新
-    annotations.value = parseGeneratedAnnotations(accumulated)
-    if (accumulated.trim() && !annotations.value.length) {
-      alert('批注生成了文本，但未能解析出有效批注。请检查模型是否按 @@编号 格式输出。')
+      const { paragraphs: batchParagraphs, offset } = batches[batchIndex]
+      if (!batchParagraphs.length) continue
+
+      console.log(`正在生成第 ${batchIndex + 1}/${batches.length} 个分片……`)
+      console.log('[annotation] batch start', batchIndex + 1, '/', batches.length, {
+        offset,
+        paragraphCount: batchParagraphs.length
+      })
+
+      const numberedText = batchParagraphs.map((p, i) => `[${offset + i}] ${p}`).join('\n\n')
+      const allowedIndexes = new Set(batchParagraphs.map((_, i) => offset + i))
+      const messages = [
+        ...baseMessages,
+        {
+          role: 'user',
+          content: `以下是当前批次的原文段落。
+方括号里的数字是系统定位编号。
+你输出批注时，@@ 后面的编号必须完全复制该数字。
+请只针对这些段落生成角色共读批注。
+不要为未出现在本批次中的段落编号输出批注。
+
+${numberedText}`
+        }
+      ]
+
+      let accumulated = ''
+      console.log('[annotation] stream start', batchIndex + 1, '/', batches.length)
+      await streamChat(config, messages, chunk => {
+        accumulated += chunk
+      }, abortController.signal)
+      console.log('[annotation] stream finished', batchIndex + 1, '/', batches.length, {
+        rawLength: accumulated.length,
+        preview: accumulated.slice(0, 300)
+      })
+
+      const parsed = parseAnnotations(accumulated, allowedIndexes)
+      console.log('[annotation] parsed', batchIndex + 1, '/', batches.length, {
+        parsedCount: parsed.length,
+        allowedIndexes: Array.from(allowedIndexes)
+      })
+      if (accumulated.trim() && !parsed.length) {
+        console.warn('[annotation] batch parsed empty', {
+          batch: batchIndex + 1,
+          rawText: accumulated
+        })
+      }
+      allGeneratedAnnotations.push(...parsed)
+      const currentMergedAnnotations = mergeAnnotationsByParagraph(allGeneratedAnnotations)
+      console.log('[annotation] accumulated final count so far', currentMergedAnnotations.length)
+      annotations.value = currentMergedAnnotations
+      await nextTick(); recalcPositions(); await refinePositions()
     }
-    await saveAnnotationsToDb(); await refinePositions()
-  } catch (e) {
-    if (e.name !== 'AbortError') { console.error(e); alert('批注生成失败: ' + e.message) }
-  } finally { generating.value = false }
+
+    if (abortController.signal.aborted) {
+      const abortError = new Error('Aborted')
+      abortError.name = 'AbortError'
+      throw abortError
+    }
+
+    const finalAnnotations = mergeAnnotationsByParagraph(allGeneratedAnnotations)
+    console.log('[annotation] all batches finished', {
+      finalCount: finalAnnotations.length
+    })
+    if (!finalAnnotations.length) {
+      alert('批注生成了文本，但未能解析出有效批注。请检查模型是否按 @@编号 格式输出。')
+      await loadAnnotations()
+      return
+    }
+
+    annotations.value = finalAnnotations
+    console.log('[annotation] saving annotations...')
+    await saveAnnotationsToDb(finalAnnotations)
+    console.log('[annotation] saved annotations, loading...')
+    await loadAnnotations()
+    console.log('[annotation] loadAnnotations finished', {
+      annotationsCount: annotations.value.length,
+      visibleCount: visibleAnnotations.value.length
+    })
+    await refinePositions()
+  } catch (err) {
+    console.error('[annotation] generate failed', err)
+    if (err.name === 'AbortError') {
+      alert('已停止生成，未替换原有批注。')
+    } else {
+      alert('批注生成失败: ' + err.message)
+    }
+    await loadAnnotations()
+  } finally {
+    console.log('[annotation] generate finally, reset generating=false')
+    generating.value = false
+    abortController = null
+  }
 }
 
-function stopGenerate() { abortController?.abort(); generating.value = false; saveAnnotationsToDb() }
+function stopGenerate() { abortController?.abort() }
 
-async function saveAnnotationsToDb() {
-  if (!annotations.value.length) return
+function mergeAnnotationsByParagraph(list) {
+  const byIndex = new Map()
+  for (const ann of list) {
+    const content = ann.content?.trim()
+    if (!content) continue
+    if (byIndex.has(ann.paragraphIndex)) {
+      byIndex.set(ann.paragraphIndex, `${byIndex.get(ann.paragraphIndex)}\n\n${content}`)
+    } else {
+      byIndex.set(ann.paragraphIndex, content)
+    }
+  }
+  return [...byIndex.entries()]
+    .map(([paragraphIndex, content]) => ({ paragraphIndex, content }))
+    .sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+}
+
+async function saveAnnotationsToDb(recordsToSave = annotations.value) {
+  if (!recordsToSave.length) return
   await db.annotations.where('chapterId').equals(currentChapter.value.id).delete()
-  const records = annotations.value.map(a => ({
+  const records = recordsToSave.map(a => ({
     bookId: props.book.id, chapterId: currentChapter.value.id,
     paragraphIndex: a.paragraphIndex, content: a.content, discussion: []
   }))
   await db.annotations.bulkAdd(records)
-  await loadAnnotations()
 }
 
 async function checkApiConfig() {
