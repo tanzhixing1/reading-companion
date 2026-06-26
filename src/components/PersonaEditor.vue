@@ -47,66 +47,68 @@
       </aside>
 
       <main class="persona-main">
-        <div class="detail-head">
-          <span class="detail-kicker">正在编辑</span>
-          <h3 class="detail-title">{{ editingTitle() }}</h3>
-          <p class="detail-hint">切换角色前会自动保存当前编辑内容。</p>
-        </div>
-
-        <section class="setting-section">
-          <h3 class="section-title">角色基础</h3>
-          <label class="field">
-            <span class="field-label">角色名称</span>
-            <input class="field-input" v-model="form.personaName" placeholder="角色名称" />
-          </label>
-          <label class="field">
-            <span class="field-label">角色设定</span>
-            <textarea
-              class="big-input persona-textarea"
-              v-model="form.persona"
-              placeholder="角色设定"
-              rows="6"
-            ></textarea>
-          </label>
-        </section>
-
-        <section class="setting-section">
-          <h3 class="section-title">用户面具</h3>
-          <label class="field">
-            <span class="field-label">用户称呼</span>
-            <input class="field-input" v-model="form.userName" placeholder="用户称呼" />
-          </label>
-          <label class="field">
-            <span class="field-label">用户面具</span>
-            <textarea
-              class="big-input mask-textarea"
-              v-model="form.userMask"
-              placeholder="用户身份描述"
-              rows="3"
-            ></textarea>
-          </label>
-        </section>
-
-        <section class="setting-section worldbook-section">
-          <div class="section-line">
-            <h3 class="section-title">世界书</h3>
-            <span class="section-note">{{ worldBookSummary(form) }}</span>
+        <div class="persona-form-scroll">
+          <div class="detail-head">
+            <span class="detail-kicker">正在编辑</span>
+            <h3 class="detail-title">{{ editingTitle() }}</h3>
+            <p class="detail-hint">切换角色前会自动保存当前编辑内容。</p>
           </div>
-          <div class="worldbook-list">
-            <div v-for="(entry, idx) in form.worldBook" :key="idx" class="wb-entry">
-              <div class="wb-header">
-                <input class="wb-name" v-model="entry.name" placeholder="条目名称" />
-                <label class="wb-toggle">
-                  <input type="checkbox" v-model="entry.enabled" />
-                  <span>启用</span>
-                </label>
-                <button class="chapter-del" @click="removeWbEntry(idx)">删除</button>
-              </div>
-              <textarea class="wb-content" v-model="entry.content" placeholder="条目内容" rows="3"></textarea>
+
+          <section class="setting-section">
+            <h3 class="section-title">角色基础</h3>
+            <label class="field">
+              <span class="field-label">角色名称</span>
+              <input class="field-input" v-model="form.personaName" placeholder="角色名称" />
+            </label>
+            <label class="field">
+              <span class="field-label">角色设定</span>
+              <textarea
+                class="big-input persona-textarea"
+                v-model="form.persona"
+                placeholder="角色设定"
+                rows="6"
+              ></textarea>
+            </label>
+          </section>
+
+          <section class="setting-section">
+            <h3 class="section-title">用户面具</h3>
+            <label class="field">
+              <span class="field-label">用户称呼</span>
+              <input class="field-input" v-model="form.userName" placeholder="用户称呼" />
+            </label>
+            <label class="field">
+              <span class="field-label">用户面具</span>
+              <textarea
+                class="big-input mask-textarea"
+                v-model="form.userMask"
+                placeholder="用户身份描述"
+                rows="3"
+              ></textarea>
+            </label>
+          </section>
+
+          <section class="setting-section worldbook-section">
+            <div class="section-line">
+              <h3 class="section-title">世界书</h3>
+              <span class="section-note">{{ worldBookSummary(form) }}</span>
             </div>
-          </div>
-          <button class="add-btn" @click="addWbEntry">+ 新增条目</button>
-        </section>
+            <div class="worldbook-list">
+              <div v-for="(entry, idx) in form.worldBook" :key="idx" class="wb-entry">
+                <div class="wb-header">
+                  <input class="wb-name" v-model="entry.name" placeholder="条目名称" />
+                  <label class="wb-toggle">
+                    <input type="checkbox" v-model="entry.enabled" />
+                    <span>启用</span>
+                  </label>
+                  <button class="chapter-del" @click="removeWbEntry(idx)">删除</button>
+                </div>
+                <textarea class="wb-content" v-model="entry.content" placeholder="条目内容" rows="3"></textarea>
+              </div>
+            </div>
+            <button class="add-btn" @click="addWbEntry">+ 新增条目</button>
+          </section>
+        </div>
 
         <div class="save-row">
           <span class="save-hint">切换角色会自动保存当前编辑内容</span>
@@ -478,6 +480,15 @@ async function save() {
   gap: 16px;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+.persona-form-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 16px;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -689,9 +700,8 @@ async function save() {
 
 .save-row {
   justify-content: flex-end;
-  position: sticky;
-  bottom: 0;
-  padding-top: 12px;
+  flex-shrink: 0;
+  padding-top: 10px;
   border-top: 1px solid var(--line);
   background: var(--paper);
 }
@@ -751,7 +761,8 @@ async function save() {
     max-height: 240px;
   }
 
-  .persona-main {
+  .persona-main,
+  .persona-form-scroll {
     overflow-y: visible;
     padding-right: 0;
   }
