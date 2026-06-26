@@ -11,7 +11,7 @@
         :class="msg.role"
       >
         <div class="comment-meta">
-          <span class="comment-role">{{ msg.role === 'user' ? userName : characterName }}</span>
+          <span class="comment-role">{{ getCommentAuthor(msg) }}</span>
           <span class="comment-actions" v-if="!editing || editIdx !== idx">
             <button class="act-btn" @click="startEdit(idx)" title="编辑">✎</button>
             <button class="act-btn" @click="deleteComment(idx)" title="删除">✕</button>
@@ -54,6 +54,7 @@
 import { ref, onMounted, watch, nextTick } from 'vue'
 import { db, getSetting } from '../db/database.js'
 import { streamChat } from '../services/llmApi.js'
+import { getActivePersona, getPersonaDisplayName } from '../services/personaService.js'
 
 const props = defineProps({
   book: Object,
@@ -73,8 +74,8 @@ const editIdx = ref(-1)
 const editText = ref('')
 
 async function loadNames() {
-  const persona = await getSetting('personaSettings')
-  if (persona?.personaName) characterName.value = persona.personaName
+  const persona = await getActivePersona()
+  characterName.value = getPersonaDisplayName(persona)
   if (persona?.userName) userName.value = persona.userName
 }
 
@@ -92,7 +93,13 @@ async function loadComments() {
   if (!props.chapter) { comments.value = []; return }
   const saved = await db.comments.where('chapterId').equals(props.chapter.id).toArray()
   saved.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-  comments.value = saved.map(c => ({ role: c.role, content: c.content, dbId: c.id }))
+  comments.value = saved.map(c => ({
+    role: c.role,
+    content: c.content,
+    personaId: c.personaId || '',
+    personaName: c.personaName || '',
+    dbId: c.id
+  }))
 }
 
 async function deleteComment(idx) {
@@ -100,6 +107,11 @@ async function deleteComment(idx) {
   const msg = comments.value[idx]
   if (msg.dbId) await db.comments.delete(msg.dbId)
   comments.value.splice(idx, 1)
+}
+
+function getCommentAuthor(msg) {
+  if (msg.role === 'user') return userName.value
+  return msg.personaName || characterName.value
 }
 
 function startEdit(idx) { editing.value = true; editIdx.value = idx; editText.value = comments.value[idx].content }
@@ -128,7 +140,9 @@ async function sendComment() {
 
   try {
     const settings = await getSetting('appSettings')
-    const persona = await getSetting('personaSettings')
+    const persona = await getActivePersona()
+    characterName.value = getPersonaDisplayName(persona)
+    if (persona?.userName) userName.value = persona.userName
     const messages = buildMessages(settings, persona)
     const config = {
       baseURL: settings.baseURL, apiKey: settings.apiKey,
@@ -139,9 +153,17 @@ async function sendComment() {
     const reply = streamingReply.value
     const replyDbId = await db.comments.add({
       bookId: props.book.id, chapterId: props.chapter.id,
-      role: 'assistant', content: reply, createdAt: Date.now()
+      role: 'assistant', content: reply, createdAt: Date.now(),
+      personaId: persona.id,
+      personaName: getPersonaDisplayName(persona)
     })
-    comments.value.push({ role: 'assistant', content: reply, dbId: replyDbId })
+    comments.value.push({
+      role: 'assistant',
+      content: reply,
+      personaId: persona.id,
+      personaName: getPersonaDisplayName(persona),
+      dbId: replyDbId
+    })
   } catch (e) {
     if (e.name !== 'AbortError') comments.value.push({ role: 'assistant', content: `[错误] ${e.message}` })
   } finally { replying.value = false; streamingReply.value = '' }
@@ -166,7 +188,7 @@ function buildMessages(settings, persona) {
     const discussions = props.annotations
       .filter(a => a.discussion && a.discussion.length > 0)
       .map(a => {
-        const chat = a.discussion.map(m => `${m.role === 'user' ? userName.value : characterName.value}: ${m.content}`).join('\n')
+        const chat = a.discussion.map(m => `${m.role === 'user' ? userName.value : (m.personaName || characterName.value)}: ${m.content}`).join('\n')
         return `[¶${a.paragraphIndex + 1} 的讨论]\n${chat}`
       })
     if (discussions.length) sys += discussions.join('\n\n') + '\n\n'

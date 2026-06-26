@@ -7,7 +7,7 @@
       </header>
 
       <div class="popup-annotation">
-        <span class="ann-label">{{ characterName }} 的批注：</span>
+        <span class="ann-label">{{ annotationAuthor }} 的批注：</span>
         <p class="ann-content">{{ annotation.content }}</p>
       </div>
 
@@ -16,7 +16,7 @@
       <div class="popup-chat" ref="chatBox">
         <div class="chat-msg" v-for="(msg, idx) in discussion" :key="idx" :class="msg.role">
           <div class="msg-meta">
-            <span class="msg-role">{{ msg.role === 'user' ? userName : characterName }}</span>
+            <span class="msg-role">{{ getMessageAuthor(msg) }}</span>
             <span class="msg-actions" v-if="editingIdx !== idx">
               <button class="act-btn" @click="startEditMsg(idx)" title="编辑">✎</button>
               <button class="act-btn" @click="deleteMsg(idx)" title="删除">✕</button>
@@ -52,10 +52,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, reactive } from 'vue'
+import { ref, onMounted, nextTick, reactive, computed } from 'vue'
 import { db, getSetting } from '../db/database.js'
 import { streamChat } from '../services/llmApi.js'
 import { getPreviousMemories } from '../services/memoryService.js'
+import { getActivePersona, getPersonaDisplayName } from '../services/personaService.js'
 
 const props = defineProps({
   annotation: Object, paragraphText: String,
@@ -71,6 +72,12 @@ const chatBox = ref(null)
 const popupEl = ref(null)
 const characterName = ref('角色')
 const userName = ref('你')
+const activePersona = ref(null)
+const annotationAuthor = computed(() => {
+  if (props.annotation?.personaName?.trim()) return props.annotation.personaName
+  if (props.annotation?.personaId) return '已删除角色'
+  return '旧批注'
+})
 const pos = reactive({ x: 0, y: 0 })
 let dragging = false
 let dragOffset = { x: 0, y: 0 }
@@ -84,8 +91,9 @@ onMounted(async () => {
     pos.x = Math.max(60, (window.innerWidth - rect.width) / 2)
     pos.y = Math.max(40, (window.innerHeight - rect.height) / 2)
   }
-  const persona = await getSetting('personaSettings')
-  if (persona?.personaName) characterName.value = persona.personaName
+  const persona = await getActivePersona()
+  activePersona.value = persona
+  characterName.value = getPersonaDisplayName(persona)
   if (persona?.userName) userName.value = persona.userName
   if (props.annotation.dbId) {
     const record = await db.annotations.get(props.annotation.dbId)
@@ -103,6 +111,10 @@ function startDrag(e) {
 
 function startEditMsg(idx) { editingIdx.value = idx; editMsgText.value = discussion.value[idx].content }
 function cancelEditMsg() { editingIdx.value = -1; editMsgText.value = '' }
+function getMessageAuthor(msg) {
+  if (msg.role === 'user') return userName.value
+  return msg.personaName || characterName.value
+}
 async function confirmEditMsg(idx) {
   const t = editMsgText.value.trim(); if (!t) return
   discussion.value[idx].content = t; await saveDiscussion(); cancelEditMsg()
@@ -121,7 +133,10 @@ async function sendMessage() {
 
   try {
     const settings = await getSetting('appSettings')
-    const persona = await getSetting('personaSettings')
+    const persona = await getActivePersona()
+    activePersona.value = persona
+    characterName.value = getPersonaDisplayName(persona)
+    if (persona?.userName) userName.value = persona.userName
     const messages = await buildMessages(settings, persona)
     const config = { 
       baseURL: settings.baseURL, apiKey: settings.apiKey, 
@@ -129,7 +144,12 @@ async function sendMessage() {
       streamSpeed: settings.streamSpeed || 'normal'
     }
     await streamChat(config, messages, chunk => { streamingReply.value += chunk; scrollChat() })
-    discussion.value.push({ role: 'assistant', content: streamingReply.value })
+    discussion.value.push({
+      role: 'assistant',
+      content: streamingReply.value,
+      personaId: persona.id,
+      personaName: getPersonaDisplayName(persona)
+    })
     await saveDiscussion()
   } catch (e) {
     if (e.name !== 'AbortError') discussion.value.push({ role: 'assistant', content: `[错误] ${e.message}` })
@@ -168,7 +188,14 @@ async function buildMessages(settings, persona) {
 
 async function saveDiscussion() {
   if (!props.annotation.dbId) return
-  await db.annotations.update(props.annotation.dbId, { discussion: discussion.value.map(m => ({ role: m.role, content: m.content })) })
+  await db.annotations.update(props.annotation.dbId, {
+    discussion: discussion.value.map(m => ({
+      role: m.role,
+      content: m.content,
+      personaId: m.personaId || '',
+      personaName: m.personaName || ''
+    }))
+  })
   emit('updated')
 }
 

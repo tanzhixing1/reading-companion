@@ -102,6 +102,9 @@ watch(activeModal, (val) => {
   if (val === null && readerRef.value?.syncTheme) {
     readerRef.value.syncTheme()
   }
+  if (val === null && readerRef.value?.syncPersona) {
+    readerRef.value.syncPersona()
+  }
 })
 
 async function generateQuote() {

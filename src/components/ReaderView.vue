@@ -63,7 +63,7 @@
               v-for="(ann, idx) in visibleAnnotations"
               :key="ann.dbId || idx"
               class="annotation-block"
-              :style="{ top: annPositions[ann.paragraphIndex] + 'px' }"
+              :style="{ top: getAnnotationTop(ann, idx) + 'px' }"
               @click="focusAnnotation(ann)"
             >
               <div class="ann-header-row">
@@ -98,7 +98,7 @@
               >
                 {{ isAnnotationExpanded(ann) ? '收起' : '展开' }}
               </button>
-              <span class="ann-author">— {{ characterName }}</span>
+              <span class="ann-author">— {{ getAnnotationAuthor(ann) }}</span>
             </div>
             <div v-if="!generating && !visibleAnnotations.length && annotations.length" class="margin-placeholder">
               当前分片暂无批注，本章共有 {{ annotations.length }} 条批注。切换分片可查看其他批注。
@@ -188,6 +188,7 @@ import { streamChat } from '../services/llmApi.js'
 import { parseAnnotations } from '../services/annotationParser.js'
 import { getPreviousMemories } from '../services/memoryService.js'
 import { applyTheme } from '../services/themeService.js'
+import { getActivePersona, getPersonaDisplayName } from '../services/personaService.js'
 import AnnotationPopup from './AnnotationPopup.vue'
 import CommentSection from './CommentSection.vue'
 
@@ -242,7 +243,12 @@ async function syncTheme() {
   await refinePositions()
 }
 
-defineExpose({ syncTheme })
+async function syncPersona() {
+  const persona = await getActivePersona()
+  characterName.value = getPersonaDisplayName(persona)
+}
+
+defineExpose({ syncTheme, syncPersona })
 
 // ===== 字号控制 =====
 function increaseFontSize() {
@@ -285,7 +291,7 @@ function recalcPositions() {
   for (const ann of sorted) {
     const desiredTop = paraTopMap[ann.paragraphIndex] ?? 0
     const actualTop = Math.max(desiredTop, lastBottom + 8)
-    positions[ann.paragraphIndex] = actualTop
+    positions[getAnnotationPositionKey(ann, sorted.indexOf(ann))] = actualTop
     const estimatedHeight = Math.max(60, Math.ceil(ann.content.length / 20) * 24 + 48)
     lastBottom = actualTop + estimatedHeight
   }
@@ -305,12 +311,20 @@ async function refinePositions() {
   sorted.forEach((ann, i) => {
     const desiredTop = paraTopMap[ann.paragraphIndex] ?? 0
     const actualTop = Math.max(desiredTop, lastBottom + 8)
-    positions[ann.paragraphIndex] = actualTop
+    positions[getAnnotationPositionKey(ann, i)] = actualTop
     const block = annBlocks[i]
     lastBottom = actualTop + (block ? block.offsetHeight : 60)
   })
   annPositions.value = positions
   textColumnHeight.value = Math.max(textColumnEl.value.scrollHeight, lastBottom + 20)
+}
+
+function getAnnotationPositionKey(ann, index = 0) {
+  return ann.dbId ? `db-${ann.dbId}` : `${ann.personaId || 'legacy'}-${ann.paragraphIndex}-${index}`
+}
+
+function getAnnotationTop(ann, index) {
+  return annPositions.value[getAnnotationPositionKey(ann, index)] ?? 0
 }
 
 watch([annotations, fragmentIndex, expandedAnnotationKeys], async () => { recalcPositions(); await refinePositions() }, { deep: true })
@@ -405,6 +419,11 @@ const visibleAnnotations = computed(() => {
 function getAnnotation(paraIndex) { return annotations.value.find(a => a.paragraphIndex === paraIndex) }
 function getParagraphText(paraIndex) { return allParagraphs.value[paraIndex] || '' }
 function openDiscussion(ann) { if (!generating.value) activeAnnotation.value = ann }
+function getAnnotationAuthor(ann) {
+  if (ann?.personaName?.trim()) return ann.personaName
+  if (ann?.personaId) return '已删除角色'
+  return '旧批注'
+}
 
 function getAnnotationKey(ann) {
   return ann.dbId ? `db-${ann.dbId}` : `p-${ann.paragraphIndex}`
@@ -501,7 +520,7 @@ async function generateSummary(mode) {
     const text = allParagraphs.value.join('\n\n')
     const messages = []
     if (mode === 'character') {
-      const persona = await getSetting('personaSettings')
+      const persona = await getActivePersona()
       let sys = ''
       if (persona?.persona) sys += persona.persona + '\n\n'
       sys += `你刚读完《${props.book.title}》的章节「${currentChapter.value.title}」。请以你的角色身份写一段读后总结（200-400字），可以带有你个人的感受、评价和风格。`
@@ -646,7 +665,14 @@ async function loadAnnotations() {
   const saved = await db.annotations.where('chapterId').equals(currentChapter.value.id).toArray()
   expandedAnnotationKeys.value = new Set()
   annotations.value = saved
-    .map(a => ({ paragraphIndex: a.paragraphIndex, content: a.content, discussion: a.discussion || [], dbId: a.id }))
+    .map(a => ({
+      paragraphIndex: a.paragraphIndex,
+      content: a.content,
+      discussion: a.discussion || [],
+      personaId: a.personaId || '',
+      personaName: a.personaName || '',
+      dbId: a.id
+    }))
     .sort((a, b) => a.paragraphIndex - b.paragraphIndex)
   await nextTick(); recalcPositions(); await refinePositions()
 }
@@ -661,7 +687,8 @@ async function clearAnnotations() {
 async function startGenerate() {
   const settings = await getSetting('appSettings')
   if (!settings?.apiKey) { alert('请先在「设置」中配置 API Key'); return }
-  const persona = await getSetting('personaSettings')
+  const persona = await getActivePersona()
+  characterName.value = getPersonaDisplayName(persona)
   generating.value = true
   abortController = new AbortController()
 
@@ -791,7 +818,11 @@ ${numberedText}`
         preview: accumulated.slice(0, 300)
       })
 
-      const parsed = parseAnnotations(accumulated, allowedIndexes)
+      const parsed = parseAnnotations(accumulated, allowedIndexes).map(ann => ({
+        ...ann,
+        personaId: persona.id,
+        personaName: getPersonaDisplayName(persona)
+      }))
       console.log('[annotation] parsed', batchIndex + 1, '/', batches.length, {
         parsedCount: parsed.length,
         allowedIndexes: Array.from(allowedIndexes)
@@ -858,22 +889,37 @@ function mergeAnnotationsByParagraph(list) {
     const content = ann.content?.trim()
     if (!content) continue
     if (byIndex.has(ann.paragraphIndex)) {
-      byIndex.set(ann.paragraphIndex, `${byIndex.get(ann.paragraphIndex)}\n\n${content}`)
+      const existing = byIndex.get(ann.paragraphIndex)
+      byIndex.set(ann.paragraphIndex, { ...existing, content: `${existing.content}\n\n${content}` })
     } else {
-      byIndex.set(ann.paragraphIndex, content)
+      byIndex.set(ann.paragraphIndex, {
+        paragraphIndex: ann.paragraphIndex,
+        content,
+        personaId: ann.personaId || '',
+        personaName: ann.personaName || ''
+      })
     }
   }
-  return [...byIndex.entries()]
-    .map(([paragraphIndex, content]) => ({ paragraphIndex, content }))
+  return [...byIndex.values()]
     .sort((a, b) => a.paragraphIndex - b.paragraphIndex)
 }
 
 async function saveAnnotationsToDb(recordsToSave = annotations.value) {
   if (!recordsToSave.length) return
-  await db.annotations.where('chapterId').equals(currentChapter.value.id).delete()
+  const personaId = recordsToSave[0]?.personaId || ''
+  if (personaId) {
+    const samePersonaKeys = await db.annotations
+      .where('chapterId')
+      .equals(currentChapter.value.id)
+      .filter(record => record.personaId === personaId)
+      .primaryKeys()
+    if (samePersonaKeys.length) await db.annotations.bulkDelete(samePersonaKeys)
+  }
   const records = recordsToSave.map(a => ({
     bookId: props.book.id, chapterId: currentChapter.value.id,
-    paragraphIndex: a.paragraphIndex, content: a.content, discussion: []
+    paragraphIndex: a.paragraphIndex, content: a.content, discussion: [],
+    personaId: a.personaId || '',
+    personaName: a.personaName || ''
   }))
   await db.annotations.bulkAdd(records)
 }
@@ -885,8 +931,8 @@ async function checkApiConfig() {
 
 async function loadChapters() {
   lastSavedReadingStateKey = ''
-  const persona = await getSetting('personaSettings')
-  if (persona?.personaName) characterName.value = persona.personaName
+  const persona = await getActivePersona()
+  characterName.value = getPersonaDisplayName(persona)
   const list = await db.chapters.where('bookId').equals(props.book.id).sortBy('order')
   chapters.value = list
   const savedChapterIndex = Number.isInteger(props.book.currentChapter) ? props.book.currentChapter : (props.book.lastChapterOrder || 0)
