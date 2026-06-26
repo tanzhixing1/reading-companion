@@ -28,6 +28,16 @@
         </div>
         <p class="book-title">{{ book.title }}</p>
         <p class="book-meta">{{ book.chapterCount }} 章</p>
+        <div class="book-progress">
+          <div class="book-progress-row">
+            <span>阅读进度</span>
+            <span>{{ formatReadingProgress(book) }}%</span>
+          </div>
+          <div class="book-progress-track">
+            <div class="book-progress-fill" :style="{ width: formatReadingProgress(book) + '%' }"></div>
+          </div>
+          <p class="book-last-read">最近阅读：{{ formatLastRead(book.lastReadAt) }}</p>
+        </div>
         <div class="book-actions">
           <button class="card-btn" @click.stop="handleExportBook(book)" title="导出">↑</button>
           <button class="card-btn del" @click.stop="deleteBook(book)" title="删除">✕</button>
@@ -91,6 +101,39 @@ async function loadBooks() {
   }
   books.value = allBooks
 }
+
+function formatReadingProgress(book) {
+  const value = Number(book?.readingProgress || 0)
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, Math.round(value)))
+}
+
+function formatTime(date) {
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${hours}:${minutes}`
+}
+
+function formatLastRead(value) {
+  if (!value) return '尚未开始'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '尚未开始'
+
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const dayDiff = Math.floor((startOfToday - startOfDate) / 86400000)
+
+  if (dayDiff === 0) return `今天 ${formatTime(date)}`
+  if (dayDiff === 1) return `昨天 ${formatTime(date)}`
+  if (dayDiff > 1 && dayDiff < 7) return `${dayDiff} 天前`
+
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 async function handleImportEpub(e) {
   const file = e.target.files[0]
   if (!file) return
@@ -274,6 +317,39 @@ async function handleImportJson(e) {
 .book-meta {
   font-size: 11px;
   color: var(--ink-soft);
+}
+.book-progress {
+  margin-top: 6px;
+  text-align: left;
+}
+.book-progress-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+.book-progress-track {
+  height: 3px;
+  margin-top: 3px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.book-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.book-last-read {
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .book-actions {
   position: absolute;

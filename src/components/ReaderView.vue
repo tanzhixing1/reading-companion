@@ -24,7 +24,7 @@
           @click="generating ? stopGenerate() : startGenerate()"
           :disabled="!hasApiConfig"
         >
-          {{ generating ? '⏹ 停止' : '✎ 请TA批注' }}
+          {{ generating ? '停止' : '请TA批注' }}
         </button>
         <button v-if="annotations.length" class="clear-btn" @click="clearAnnotations">清除批注</button>
       </div>
@@ -47,7 +47,10 @@
             :key="idx"
             class="paragraph"
             :data-para-index="fragmentOffset + idx"
-            :class="{ 'has-annotation': getAnnotation(fragmentOffset + idx) }"
+            :class="{
+              'has-annotation': getAnnotation(fragmentOffset + idx),
+              'paragraph-highlight': highlightedParagraphIndex === fragmentOffset + idx
+            }"
           >
             <span class="para-num">{{ fragmentOffset + idx + 1 }}</span>
             {{ para }}
@@ -61,13 +64,14 @@
               :key="ann.dbId || idx"
               class="annotation-block"
               :style="{ top: annPositions[ann.paragraphIndex] + 'px' }"
+              @click="focusAnnotation(ann)"
             >
               <div class="ann-header-row">
                 <span class="ann-anchor">¶{{ ann.paragraphIndex + 1 }}</span>
                 <div class="ann-actions">
-                  <button class="act-btn" @click="startEditAnnotation(ann)" title="编辑">✎</button>
-                  <button class="act-btn" @click="deleteAnnotation(ann)" title="删除">✕</button>
-                  <button class="act-btn discuss" @click="openDiscussion(ann)" title="讨论">💬
+                  <button class="act-btn" @click.stop="startEditAnnotation(ann)" title="编辑">✎</button>
+                  <button class="act-btn" @click.stop="deleteAnnotation(ann)" title="删除">✕</button>
+                  <button class="act-btn discuss" @click.stop="openDiscussion(ann)" title="讨论">💬
                     <span v-if="ann.discussion?.length" class="discuss-count">{{ ann.discussion.length }}</span>
                   </button>
                 </div>
@@ -75,17 +79,31 @@
               <div v-if="editingAnnId === ann.dbId" class="ann-edit-box">
                 <textarea class="ann-edit-input" v-model="editAnnText" rows="3"></textarea>
                 <div class="ann-edit-actions">
-                  <button class="action-btn" @click="cancelEditAnnotation">取消</button>
-                  <button class="action-btn primary" @click="confirmEditAnnotation(ann)">保存</button>
+                  <button class="action-btn" @click.stop="cancelEditAnnotation">取消</button>
+                  <button class="action-btn primary" @click.stop="confirmEditAnnotation(ann)">保存</button>
                 </div>
               </div>
-              <p v-else class="ann-text">
+              <p
+                v-else
+                class="ann-text"
+                :class="{ 'ann-text-collapsed': isLongAnnotation(ann) && !isAnnotationExpanded(ann) }"
+              >
                 {{ ann.content }}
                 <span v-if="generating && idx === visibleAnnotations.length - 1 && ann.content" class="cursor-blink">|</span>
               </p>
+              <button
+                v-if="editingAnnId !== ann.dbId && isLongAnnotation(ann)"
+                class="ann-toggle"
+                @click.stop="toggleAnnotationExpanded(ann)"
+              >
+                {{ isAnnotationExpanded(ann) ? '收起' : '展开' }}
+              </button>
               <span class="ann-author">— {{ characterName }}</span>
             </div>
-            <div v-if="!generating && !visibleAnnotations.length" class="margin-placeholder">
+            <div v-if="!generating && !visibleAnnotations.length && annotations.length" class="margin-placeholder">
+              当前分片暂无批注，本章共有 {{ annotations.length }} 条批注。切换分片可查看其他批注。
+            </div>
+            <div v-else-if="!generating && !visibleAnnotations.length" class="margin-placeholder">
               — 点击「请TA批注」—
             </div>
           </div>
@@ -142,10 +160,10 @@
 
       <nav class="chapter-nav">
         <button class="nav-btn" :disabled="!canPrev" @click="goPrev">
-          {{ fragmentIndex > 0 ? '← 上一段' : '← 上一章' }}
+          {{ fragmentIndex > 0 ? '上一段' : '上一章' }}
         </button>
         <button class="nav-btn" :disabled="!canNext" @click="goNext">
-          {{ fragmentIndex < totalFragments - 1 ? '下一段 →' : '下一章 →' }}
+          {{ fragmentIndex < totalFragments - 1 ? '下一段' : '下一章' }}
         </button>
       </nav>
     </div>
@@ -195,6 +213,12 @@ const textColumnHeight = ref(0)
 const editingAnnId = ref(null)
 const editAnnText = ref('')
 const currentFontSize = ref(15)
+const highlightedParagraphIndex = ref(null)
+const expandedAnnotationKeys = ref(new Set())
+const highestReadingProgress = ref(0)
+let highlightTimer = null
+let saveProgressTimer = null
+let lastSavedReadingStateKey = ''
 
 // 摘要相关
 const chapterMemory = ref(null)
@@ -289,14 +313,56 @@ async function refinePositions() {
   textColumnHeight.value = Math.max(textColumnEl.value.scrollHeight, lastBottom + 20)
 }
 
-watch([annotations, fragmentIndex], async () => { recalcPositions(); await refinePositions() }, { deep: true })
+watch([annotations, fragmentIndex, expandedAnnotationKeys], async () => { recalcPositions(); await refinePositions() }, { deep: true })
 
 let resizeTimer = null
 function onResize() { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { recalcPositions(); refinePositions() }, 200) }
-onMounted(() => window.addEventListener('resize', onResize))
-onUnmounted(() => window.removeEventListener('resize', onResize))
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  window.addEventListener('focus', refreshAnnotationsOnResume)
+  document.addEventListener('visibilitychange', refreshAnnotationsOnResume)
+  nextTick(() => {
+    scrollContainer.value?.addEventListener('scroll', onReaderScroll, { passive: true })
+  })
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
+  window.removeEventListener('focus', refreshAnnotationsOnResume)
+  document.removeEventListener('visibilitychange', refreshAnnotationsOnResume)
+  scrollContainer.value?.removeEventListener('scroll', onReaderScroll)
+  clearTimeout(resizeTimer)
+  clearTimeout(highlightTimer)
+  clearTimeout(saveProgressTimer)
+  saveReadingState({ touchLastRead: true })
+})
+
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, Math.round(value)))
+}
+
+function onReaderScroll() {
+  scheduleReadingStateSave()
+}
+
+function scheduleReadingStateSave() {
+  clearTimeout(saveProgressTimer)
+  saveProgressTimer = setTimeout(() => {
+    saveReadingState({ touchLastRead: true })
+  }, 800)
+}
 
 // ===== 核心数据 =====
+async function refreshAnnotationsOnResume() {
+  if (document.visibilityState && document.visibilityState !== 'visible') return
+  if (!currentChapter.value || generating.value) return
+  try {
+    await loadAnnotations()
+  } catch (err) {
+    console.warn('[annotation] refresh on resume failed', err)
+  }
+}
+
 const totalChapters = computed(() => chapters.value.length)
 const currentChapter = computed(() => chapters.value[chapterIndex.value])
 const allParagraphs = computed(() => currentChapter.value?.paragraphs || [])
@@ -340,6 +406,72 @@ function getAnnotation(paraIndex) { return annotations.value.find(a => a.paragra
 function getParagraphText(paraIndex) { return allParagraphs.value[paraIndex] || '' }
 function openDiscussion(ann) { if (!generating.value) activeAnnotation.value = ann }
 
+function getAnnotationKey(ann) {
+  return ann.dbId ? `db-${ann.dbId}` : `p-${ann.paragraphIndex}`
+}
+
+function isLongAnnotation(ann) {
+  return (ann.content || '').length > 220
+}
+
+function isAnnotationExpanded(ann) {
+  return expandedAnnotationKeys.value.has(getAnnotationKey(ann))
+}
+
+async function toggleAnnotationExpanded(ann) {
+  const key = getAnnotationKey(ann)
+  const next = new Set(expandedAnnotationKeys.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedAnnotationKeys.value = next
+  await nextTick()
+  recalcPositions()
+  await refinePositions()
+}
+
+function findFragmentIndexByParagraph(paragraphIndex) {
+  let offset = 0
+  for (let i = 0; i < fragments.value.length; i++) {
+    const length = fragments.value[i].length
+    if (paragraphIndex >= offset && paragraphIndex < offset + length) return i
+    offset += length
+  }
+  return -1
+}
+
+async function focusAnnotation(ann) {
+  const paragraphIndex = Number(ann?.paragraphIndex)
+  if (!Number.isInteger(paragraphIndex) || paragraphIndex < 0 || paragraphIndex >= allParagraphs.value.length) return
+
+  const targetFragmentIndex = findFragmentIndexByParagraph(paragraphIndex)
+  if (targetFragmentIndex === -1) return
+  if (targetFragmentIndex !== fragmentIndex.value) {
+    fragmentIndex.value = targetFragmentIndex
+    await nextTick()
+    recalcPositions()
+    await refinePositions()
+  }
+
+  await nextTick()
+  const selector = `.paragraph[data-para-index="${paragraphIndex}"]`
+  const paraEl = textColumnEl.value?.querySelector(selector)
+  const container = scrollContainer.value
+  if (!paraEl || !container) return
+
+  clearTimeout(highlightTimer)
+  highlightedParagraphIndex.value = null
+  await nextTick()
+  highlightedParagraphIndex.value = paragraphIndex
+
+  const containerRect = container.getBoundingClientRect()
+  const paraRect = paraEl.getBoundingClientRect()
+  const targetTop = container.scrollTop + paraRect.top - containerRect.top - (container.clientHeight / 2) + (paraEl.offsetHeight / 2)
+  container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' })
+  highlightTimer = setTimeout(() => {
+    if (highlightedParagraphIndex.value === paragraphIndex) highlightedParagraphIndex.value = null
+  }, 2600)
+}
+
 // 批注编辑
 function startEditAnnotation(ann) { editingAnnId.value = ann.dbId; editAnnText.value = ann.content }
 function cancelEditAnnotation() { editingAnnId.value = null; editAnnText.value = '' }
@@ -349,7 +481,7 @@ async function confirmEditAnnotation(ann) {
   cancelEditAnnotation()
 }
 async function deleteAnnotation(ann) {
-  if (!confirm('确定删除这条批注及其讨论记录？')) return
+  if (!confirm('确定删除这条批注及其讨论记录吗？')) return
   if (ann.dbId) await db.annotations.delete(ann.dbId)
   await loadAnnotations()
 }
@@ -377,7 +509,7 @@ async function generateSummary(mode) {
     } else {
       messages.push({
         role: 'system',
-        content: `你是一个精准的文本摘要助手。请为以下章节内容生成一段中性、客观的内容梗概（200-400字），包含主要情节、出场人物、关键事件。不要加入个人评价，不要使用"本章"等元叙述用语，直接陈述发生了什么。`
+        content: `你是一个精准的文本摘要助手。请为以下章节内容生成一段中性、客观的内容梗概（200-400字），包含主要情节、出场人物、关键事件。不要加入个人评价，不要使用“本章”等元叙述用语，直接陈述发生了什么。`
       })
     }
     messages.push({ role: 'user', content: `《${props.book.title}》章节「${currentChapter.value.title}」的内容：\n\n${text}` })
@@ -437,21 +569,82 @@ function goNext() {
   scrollTop(); saveProgress(); loadAnnotations(); loadMemory()
   emit('chapterChange', currentChapter.value)
 }
-function goPrev() {
+async function goPrev() {
   if (fragmentIndex.value > 0) { fragmentIndex.value-- }
   else if (chapterIndex.value > 0) {
     chapterIndex.value--; fragmentIndex.value = 0
-    setTimeout(() => { fragmentIndex.value = totalFragments.value - 1 }, 0)
+    await nextTick()
+    fragmentIndex.value = totalFragments.value - 1
   }
   scrollTop(); saveProgress(); loadAnnotations(); loadMemory()
   emit('chapterChange', currentChapter.value)
 }
-function scrollTop() { scrollContainer.value?.scrollTo({ top: 0, behavior: 'smooth' }) }
-async function saveProgress() { await db.books.update(props.book.id, { currentChapter: chapterIndex.value }) }
+function scrollTop() {
+  scrollContainer.value?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function getScrollRatio() {
+  const el = scrollContainer.value
+  if (!el) return 0
+  const maxScroll = el.scrollHeight - el.clientHeight
+  if (maxScroll <= 0) return 1
+  return Math.min(1, Math.max(0, el.scrollTop / maxScroll))
+}
+
+function estimateParagraphPosition(scrollRatio = getScrollRatio()) {
+  const count = allParagraphs.value.length
+  if (!count) return 0
+  const visibleCount = visibleParagraphs.value.length
+  const estimatedInFragment = visibleCount <= 0 ? 0 : Math.floor(scrollRatio * Math.max(visibleCount - 1, 0))
+  return Math.min(count - 1, Math.max(0, fragmentOffset.value + estimatedInFragment))
+}
+
+function estimateBookProgress(scrollRatio = getScrollRatio()) {
+  const totalParagraphs = chapters.value.reduce((sum, ch) => sum + (ch.paragraphs?.length || 0), 0)
+  if (!totalParagraphs) return 0
+  const paragraphsBeforeChapter = chapters.value
+    .slice(0, chapterIndex.value)
+    .reduce((sum, ch) => sum + (ch.paragraphs?.length || 0), 0)
+  const visibleCount = visibleParagraphs.value.length
+  const visibleRatio = visibleCount <= 0 ? 0 : scrollRatio * visibleCount
+  const rawProgress = ((paragraphsBeforeChapter + fragmentOffset.value + visibleRatio) / totalParagraphs) * 100
+  const isAtBookEnd = chapterIndex.value === totalChapters.value - 1 && isLastFragment.value && scrollRatio >= 0.99
+  return isAtBookEnd ? 100 : clampPercent(rawProgress)
+}
+
+async function saveReadingState({ touchLastRead = true, scrollRatio = getScrollRatio() } = {}) {
+  if (!props.book?.id || !currentChapter.value) return
+  try {
+    const nextProgress = Math.max(highestReadingProgress.value, estimateBookProgress(scrollRatio))
+    highestReadingProgress.value = nextProgress
+    const update = {
+      currentChapter: chapterIndex.value,
+      readingProgress: nextProgress,
+      lastChapterId: currentChapter.value.id,
+      lastChapterOrder: currentChapter.value.order ?? chapterIndex.value,
+      lastParagraphIndex: estimateParagraphPosition(scrollRatio),
+      lastChunkIndex: fragmentIndex.value
+    }
+    const stateKey = JSON.stringify(update)
+    if (stateKey === lastSavedReadingStateKey) return
+    if (touchLastRead) update.lastReadAt = new Date().toISOString()
+    await db.books.update(props.book.id, update)
+    Object.assign(props.book, update)
+    lastSavedReadingStateKey = stateKey
+  } catch (err) {
+    console.warn('[reading-progress] save failed', err)
+  }
+}
+
+async function saveProgress() {
+  clearTimeout(saveProgressTimer)
+  await saveReadingState({ touchLastRead: true, scrollRatio: 0 })
+}
 
 async function loadAnnotations() {
   if (!currentChapter.value) { annotations.value = []; return }
   const saved = await db.annotations.where('chapterId').equals(currentChapter.value.id).toArray()
+  expandedAnnotationKeys.value = new Set()
   annotations.value = saved
     .map(a => ({ paragraphIndex: a.paragraphIndex, content: a.content, discussion: a.discussion || [], dbId: a.id }))
     .sort((a, b) => a.paragraphIndex - b.paragraphIndex)
@@ -497,7 +690,7 @@ async function startGenerate() {
         content: `【世界书】
 以下内容用于强化角色视角、关系背景和说话风格。
 世界书不是让你脱离当前文本写剧情。
-生成批注时，必须优先贴合当前批次段落；只有当前段落能自然触发时，才轻微使用世界书信息。
+生成批注时，必须优先贴合当前段落；只有当前段落能自然触发时，才轻微使用世界书信息。
 
 ${worldBookText}`
       })
@@ -514,11 +707,8 @@ ${worldBookText}`
   if (persona?.personaName) sysContent += `你当前扮演的角色名是：${persona.personaName}\n\n`
   if (persona?.persona) sysContent += `【角色设定】\n${persona.persona}\n\n`
   if (persona?.userMask) sysContent += `【关于用户】\n${persona.userMask}\n\n`
-  sysContent += `你正在阅读《${props.book.title}》的章节「${currentChapter.value.title}」。
-请以当前角色的身份，为当前批次段落写角色共读批注。
-
+  sysContent += `你正在阅读《${props.book.title}》的章节「${currentChapter.value.title}」。请以当前角色的身份，为当前批次段落写角色共读批注。
 你生成的是角色共读批注，不是 AI 摘要。每条批注都必须像当前角色读到这一处时自然留下的一句话。角色的锋利不是攻击性，而是观察准确；角色的温柔不是热烈，而是留有余地。
-
 批注原则：
 1. 批注不是 AI 摘要，不要概括本段讲了什么。
 2. 批注不是文学赏析，不要写成作文点评、修辞分析或主题提炼。
@@ -581,7 +771,7 @@ ${worldBookText}`
         ...baseMessages,
         {
           role: 'user',
-          content: `以下是当前批次的原文段落。
+          content: `以下是当前可见的原文段落。
 方括号里的数字是系统定位编号。
 你输出批注时，@@ 后面的编号必须完全复制该数字。
 请只针对这些段落生成角色共读批注。
@@ -694,17 +884,25 @@ async function checkApiConfig() {
 }
 
 async function loadChapters() {
+  lastSavedReadingStateKey = ''
   const persona = await getSetting('personaSettings')
   if (persona?.personaName) characterName.value = persona.personaName
   const list = await db.chapters.where('bookId').equals(props.book.id).sortBy('order')
   chapters.value = list
-  chapterIndex.value = props.book.currentChapter || 0
+  const savedChapterIndex = Number.isInteger(props.book.currentChapter) ? props.book.currentChapter : (props.book.lastChapterOrder || 0)
+  chapterIndex.value = Math.min(Math.max(savedChapterIndex, 0), Math.max(list.length - 1, 0))
   fragmentIndex.value = 0
   const appSettings = await getSetting('appSettings')
   fragmentSize.value = appSettings?.fragmentSize || 0
+  await nextTick()
+  const savedChunkIndex = Number.isInteger(props.book.lastChunkIndex) ? props.book.lastChunkIndex : 0
+  fragmentIndex.value = Math.min(Math.max(savedChunkIndex, 0), Math.max(totalFragments.value - 1, 0))
+  highestReadingProgress.value = clampPercent(props.book.readingProgress || 0)
   const themeSettings = await getSetting('themeSettings')
   if (themeSettings?.fontSize) currentFontSize.value = themeSettings.fontSize
   await loadAnnotations(); await loadMemory(); await checkApiConfig()
+  await nextTick()
+  await saveReadingState({ touchLastRead: true })
   emit('chapterChange', chapters.value[chapterIndex.value])
 }
 
@@ -761,9 +959,13 @@ watch(() => props.book, () => { if (props.book) loadChapters() }, { immediate: t
 
 .paragraph {
   position: relative; margin-bottom: 12px; padding-left: 32px;
-  border-left: 2px solid transparent; transition: border-color 0.3s;
+  border-left: 2px solid transparent; transition: border-color 0.3s, background-color 0.35s, box-shadow 0.35s;
 }
 .paragraph.has-annotation { border-left-color: var(--accent); }
+.paragraph.paragraph-highlight {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 8%, transparent);
+}
 .para-num {
   position: absolute; left: 0; top: 0; font-size: 10px; color: var(--ink-soft);
   user-select: none; width: 24px; text-align: right;
@@ -772,6 +974,7 @@ watch(() => props.book, () => { if (props.book) loadChapters() }, { immediate: t
 .annotation-block {
   position: absolute; left: 0; right: 0;
   padding-bottom: 14px; border-bottom: 1px solid var(--line);
+  cursor: pointer;
 }
 .ann-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .ann-anchor { font-size: 11px; color: var(--accent); letter-spacing: 0.1em; }
@@ -785,6 +988,18 @@ watch(() => props.book, () => { if (props.book) loadChapters() }, { immediate: t
   font-family: var(--font-annotation); font-size: var(--font-size-annotation);
   line-height: 1.8; color: var(--color-annotation); font-style: italic;
 }
+.ann-text-collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ann-toggle {
+  margin-top: 2px; padding: 0; border: 0;
+  font-size: 11px; color: var(--accent);
+  background: transparent; cursor: pointer;
+}
+.ann-toggle:hover { text-decoration: underline; }
 .ann-author { display: block; font-size: 11px; color: var(--ink-soft); font-style: italic; margin-top: 4px; }
 
 .ann-edit-box { margin-top: 4px; }
